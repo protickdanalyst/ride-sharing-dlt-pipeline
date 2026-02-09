@@ -1,28 +1,90 @@
-# Ride Sharing DLT Pipeline (Databricks) — Production Medallion Architecture
+# Transportation DLT Pipeline (Databricks) 🚦 — Production Medallion With Guardrails, Drift Intelligence & Recovery
 
-A production-minded Delta Live Tables (DLT) pipeline implementing a Medallion pattern (Bronze → Silver → Gold) for **City** master data and **Trips** fact data. The pipeline emphasizes **streaming correctness**, **strict contracts**, **quarantine-based data quality**, **schema/type drift observability**, **rescued-data recovery**, and **guardrails** that can block unsafe runs.
-
----
-
-## Short Briefing
-
-This project ingests raw CSV drops using Auto Loader into **Bronze** with strong ingestion metadata, promotes governed datasets in **Silver** using explicit contracts and quality enforcement, and publishes analyst-ready **Gold** facts/dimensions including both **current** and **as-of** (SCD2-aware) truth models. It includes an operational framework for **late-arrival policy**, **replay**, and **bounded backfill**—plus monitoring tables that quantify drift, quarantine rates, join drop, freshness, corrupt/rescued rates, and rescued key distributions.
+A **staff-level** Delta Live Tables (DLT) implementation of a Medallion architecture (**Bronze → Silver → Gold**) for **City** master data and **Trips** fact data. Built to be more than “working code”: it’s designed to be **operable**, **auditable**, and **evolution-friendly** under real-world data drift.
 
 ---
 
-## Key Outcomes
+## Why This Project Has Serious Potential
 
-- **Reliable ingestion** with file lineage + deterministic dedupe
-- **Governed Silver layer** with strict schema projection and DQ enforcement
-- **Quarantine-first error handling** with reasons for triage/recovery
-- **SCD2 City dimension** with both **current** and **as-of** usage patterns
-- **Gold facts** suitable for BI and analytics with core business measures
-- **Observability tables** and **guardrails** to prevent silent data regressions
-- **Rescued data recovery path** for evolving schemas without breaking pipelines
+Most pipelines fail in production for boring reasons: silent schema changes, partial loads, late arrivals, dimension mismatches, and no operational visibility. This project tackles those head-on with:
+
+- **Streaming-correct architecture** (no batch/stream traps, state handled safely)
+- **Contract-governed Silver** (explicit schemas, enforced expectations, quarantine routing)
+- **Schema + type drift intelligence** (proactive detection, not reactive firefighting)
+- **Rescued data recovery workflow** (a controlled path from unknown fields → governed fields)
+- **Business-ready Gold** with both:
+  - **current-state truth** (fast, BI-friendly)
+  - **as-of truth** (historically correct, SCD2-aware)
+
+If you extend this into a platform pattern (new datasets plug in via mappings + contracts), it becomes a reusable “DLT factory”.
 
 ---
 
-## Project Structure
+## Quick Brief
+
+**Inputs**
+- City CSV drops
+- Trips CSV drops
+- Optional Trips backfill stream
+
+**Outputs**
+- Governed Silver tables with strict contracts + quarantine
+- Gold facts/dimensions for BI + analytics
+- Monitoring and guardrail tables that quantify pipeline health and can fail unsafe runs
+
+---
+
+## What You Get (Outcomes)
+
+- **Lineage you can trust:** file path, file timestamps, size, run id, record hash
+- **Idempotent ingestion:** deterministic dedupe using `_record_hash`
+- **Auditability:** run metadata + quality summaries + drift logs
+- **Recoverability:** quarantine + late replay + bounded backfill + rescued profiling
+- **Analyst usability:** clean dims/facts with measures (distance, fare, ratings, trip counts)
+- **Correctness options:** current model vs as-of model
+
+---
+
+## Architecture At a Glance
+
+```text
+                 +-----------------------------+
+                 |   Raw Files (CSV drops)     |
+                 |   - city                    |
+                 |   - trips                   |
+                 +--------------+--------------+
+                                |
+                                v
++--------------------+    +--------------------+
+| Bronze (Streaming) |    | Bronze Backfill    |
+| Auto Loader +      |    | (Streaming)        |
+| rescued/corrupt +  |    | bounded window     |
+| metadata + dedupe  |    +--------------------+
++---------+----------+
+          |
+          v
++-----------------------------+
+| Silver (Governed)           |
+| - contracts via mapping      |
+| - expect_or_drop enforcement |
+| - quarantine with reasons    |
+| - late policy + replay gate  |
++---------+-------------------+
+          |
+          v
++----------------------------------------------+
+| Gold (Consumption)                            |
+| - dim_city_current, dim_date                  |
+| - fact_trips_current (fast BI)                |
+| - fact_trips_asof (historical truth)          |
+| - fact_trips_daily (rollups)                  |
+| - guardrails + quality summaries              |
++----------------------------------------------+
+```
+
+---
+
+## Repository Structure
 
 ```text
 transportation_pipeline/
@@ -73,250 +135,155 @@ transportation_pipeline/
 
 ---
 
-## Data Flow
+## Bronze Layer — What Makes It “Production”
+Bronze doesn’t just ingest. It **stabilizes** ingestion:
 
-### Bronze — Ingestion & Lineage (Streaming)
-**Inputs**
-- `CITY_PATH`, `TRIPS_PATH` (Auto Loader CSV)
-- optional `TRIPS_BACKFILL_PATH` for bounded backfill
+**Captured per record**
+- `_source_file`, `_source_file_mod_ts`, `_source_file_size`
+- `_ingest_ts`, `_ingest_date`, `_ingest_yyyymmdd`
+- `_ingest_run_id`
+- `_record_hash` (deterministic record identity for dedupe)
 
-**Outputs**
-- `bronze_city`
-- `bronze_trips`
-- `bronze_trips_backfill` (conditional)
-
-**Guarantees**
-- Strong ingestion metadata:
-  - `_ingest_ts`, `_ingest_date`, `_ingest_yyyymmdd`
-  - `_source_file`, `_source_file_mod_ts`, `_source_file_size`
-  - `_ingest_run_id`, `_record_hash`
-- Resilient ingestion:
-  - `_rescued_data` for schema evolution
-  - `_corrupt_record` for parse failures
-- Deterministic dedupe using `_record_hash` + watermark
+**Resiliency**
+- `_rescued_data` for unknown columns
+- `_corrupt_record` for malformed rows
+- Dedupe with watermark + `_record_hash`
 
 ---
 
-### Silver — Governed Contracts, DQ Enforcement, Quarantine
-**Outputs**
-- `silver_city` (SCD2 via `apply_changes`)
-- `silver_trips` (SCD1 via `apply_changes`)
-- `quarantine_city`, `quarantine_trips`
-- drift/quality observability and rescued profiling tables
+## Silver Layer — Governance You Can Operate
+Silver is where correctness becomes enforceable:
 
-**Guarantees**
-- Mapping-based contract projection into explicit `StructType` contracts
-- Strict data quality enforcement via `expect_or_drop` on critical constraints
-- Quarantine routing with `_reject_reason`
-- Deterministic late-arrival identification
-- Replay and backfill sources are streaming-safe (no batch/stream union)
+- **Explicit contracts** (`StructType`) for City and Trips
+- **Mapping-driven projection** (standardization is systematic, not ad hoc)
+- **Strict enforcement** (`expect_or_drop`) for required fields and core constraints
+- **Quarantine tables** with `_reject_reason` for triage and replay/backfill workflows
+- **Late arrivals** handled deterministically and routed explicitly
 
----
+### Late Arrivals (Policy)
+Records older than the defined window are treated as late and quarantined with `late_arrival`.
+A gated replay mechanism allows selective re-introduction with a tracked `_replay_id`.
 
-### Gold — BI Ready Facts, Dims, Metrics & Guardrails
-**Dimensions**
-- `dim_city_current` (current snapshot of SCD2 city)
-- `dim_date`
-
-**Facts**
-- `fact_trips_current` (joins to current city)
-- `fact_trips_asof` (SCD2 as-of join for historical truth)
-- `fact_trips_daily` (rollups)
-
-**Operational / Monitoring**
-- `bronze_ingest_quality` (corrupt/rescued rates + rescued key counts)
-- `join_drop_summary` (current + as-of join integrity)
-- `data_quality_summary`, `freshness_summary`
-- `ops_run_audit`
-- `pipeline_guardrails`
-- `quarantine_retention_candidates`
+### Backfill (Bounded + Auditable)
+Backfill is handled via a **separate streaming source** and bounded by configured dates.
+Rows are tagged with `_backfill_id` and `_backfill_reason`.
 
 ---
 
-## Senior Staff Review — Detailed Checklist
+## Gold Layer — Two Truth Models (Current vs As-Of)
 
-### 1) Architecture & Layering
-- [x] Medallion layers are clearly separated (Bronze/Silver/Gold)
-- [x] Transformations and governance are isolated in Silver
-- [x] Consumption and analytics are isolated in Gold
-- [x] Backfill is isolated into a separate input stream to avoid contaminating primary ingestion
+### 1) Current Model (fast BI)
+`fact_trips_current` joins trips to **current** city dimension values:
+- best for dashboards
+- fastest joins
+- matches “present-day” reporting needs
 
-**Assessment:** Strong. Clear separation of responsibilities and stable layering.
+### 2) As-Of Model (historically correct)
+`fact_trips_asof` joins trips to city attributes **as they were at the trip time**:
+- correct under SCD2 changes
+- required for historical truth / regulated reporting
 
----
-
-### 2) DLT Streaming Semantics & Correctness
-- [x] No multipart DLT dataset references inside `dlt.read*` calls
-- [x] No union between streaming and batch DataFrames
-- [x] All conditional sources return stream-compatible empty datasets
-- [x] Watermarks applied for stateful operations (dedupe / streaming stability)
-- [x] SCD2 target schema is not pinned (avoids incompatibility with managed columns)
-
-**Assessment:** Correct DLT patterns are applied consistently.
+### Plus: Daily Rollups
+`fact_trips_daily` provides a clean consumption layer for analysts and product metrics.
 
 ---
 
-### 3) Schema Contracts & Enforcement
-- [x] Silver outputs are projected to explicit contracts (`StructType`)
-- [x] Mapping-based transformation provides consistent field standardization
-- [x] Strict data quality enforcement via `expect_or_drop`
-- [x] Schema drift is logged with missing required columns and unexpected columns
-- [x] Type drift is measured (cast-failure detection)
+## Drift Intelligence & Observability (Staff-Level Feature Set)
 
-**Assessment:** Strong contract discipline. Observability is mature.
+### Schema drift detection
+`silver.schema_drift_log`
+- missing required columns (breaking drift)
+- unexpected columns (growth signals)
 
----
+### Type drift detection
+`silver.type_drift_log`
+- detects cast failures field-by-field
+- summarized by `silver.type_drift_guardrails`
 
-### 4) Data Quality Routing & Quarantine
-- [x] Invalid records are routed to quarantine tables with `_reject_reason`
-- [x] Quarantine is partitioned by `_ingest_yyyymmdd` for lifecycle and performance
-- [x] Quarantine rate is measured in Gold
-- [x] Guardrails include quarantine-rate thresholds
+### Rescued profiling
+- `silver.rescued_city_profile`
+- `silver.rescued_trips_profile`
+Shows which fields are landing in rescued and how frequently—this is the input to your controlled promotion plan.
 
-**Assessment:** Good operational hygiene; quarantine is actionable.
+### Quality summaries + Guardrails
+Gold tables compute:
+- quarantine rates
+- corrupt/rescued rates
+- join drop (current and as-of)
+- freshness SLA indicators
+- drift rates
 
----
-
-### 5) Late-Arrival Policy (Business Logic)
-- [x] Late arrivals are identified deterministically using ingest-date window
-- [x] Late arrivals quarantined with explicit reason (`late_arrival`)
-- [x] Replay path is gated and tagged (`_replay_id`)
-- [x] Replay is restricted to late arrivals only
-
-**Assessment:** Clear and controllable; late policy is consistent with streaming realities.
+`gold.pipeline_guardrails` centralizes the checks and can stop unsafe runs.
 
 ---
 
-### 6) Backfill Design (Safety, Determinism)
-- [x] Backfill runs from isolated input (`bronze_trips_backfill`)
-- [x] Backfill is bounded via date filters
-- [x] Backfill is tagged (`_backfill_id`, `_backfill_reason`)
-- [x] Backfill remains streaming-correct and does not introduce batch/stream unions
+## Senior Staff Review Checklist (What This Demonstrates)
 
-**Assessment:** Safe and auditable backfill approach.
+### A) Streaming Correctness & Stability
+- [x] No batch/stream unions
+- [x] Stream-compatible empty sources for conditional flows
+- [x] Watermark usage aligned to stateful ops
+- [x] SCD2 targets avoid pinned schema conflicts
 
----
+### B) Governance & Contracts
+- [x] Explicit contracts in Silver
+- [x] Mapping-driven projection to contract shape
+- [x] Strict expectation enforcement for critical fields
 
-### 7) Metadata, Lineage & Idempotency
-- [x] `_source_file` and file metadata are captured for lineage
-- [x] `_ingest_run_id` supports run-level tracing
-- [x] `_record_hash` supports deterministic dedupe/idempotency
-- [x] Metadata fields are consistently propagated into Silver contracts
+### C) Quarantine & Recovery
+- [x] Quarantine with actionable reasons
+- [x] Late arrival policy + gated replay
+- [x] Bounded backfill stream + tagging for audit
 
-**Assessment:** Solid lineage foundation for triage and audit.
+### D) Drift & Evolution Readiness
+- [x] Schema drift logs (required + unexpected)
+- [x] Type drift logs (cast failure detection)
+- [x] Rescued profiling + promotion registry hook
 
----
+### E) Analyst/Business Readiness
+- [x] Current + as-of truth models
+- [x] Core business measures present
+- [x] Daily aggregates for consumption
 
-### 8) Rescued Data Recovery (Schema Evolution)
-- [x] Bronze captures `_rescued_data` for schema evolution
-- [x] Rescued profiling tables show rescued keys and frequency
-- [x] Promotion mechanism exists via registry + `promote_from_rescued`
-- [x] Gold metrics quantify rescued rate and key distribution
-
-**Assessment:** Practical and controlled approach to evolving schemas.
-
----
-
-### 9) Observability & Guardrails (Operational Control)
-- [x] Bronze ingest quality metrics (corrupt/rescued rates)
-- [x] Schema drift logging (missing required + unexpected columns)
-- [x] Type drift logging and rollup
-- [x] Join integrity metrics (current + as-of)
-- [x] Freshness tracking for core datasets
-- [x] Unified guardrail table that can fail the pipeline when thresholds are breached
-
-**Assessment:** Strong monitoring surface area; guardrails are comprehensive.
+### F) Operability
+- [x] Run context tracking via `ops_run_audit`
+- [x] Health tables support dashboards and alerting
+- [x] Guardrails unify operational signals into one decision point
 
 ---
 
-### 10) Gold Modeling & Analyst Readiness
-- [x] `dim_city_current` supports “current-state” reporting
-- [x] `fact_trips_asof` supports historically correct reporting
-- [x] `fact_trips_daily` provides pre-aggregated consumption datasets
-- [x] Fact includes business measures: distance, fare, ratings, trip_count
+## High-Impact Next Enhancements (Roadmap-Level)
 
-**Assessment:** Analyst-friendly and supports both operational and historical truth.
+These aren’t “missing basics”—they’re how you scale from strong pipeline → strong platform:
 
----
+1. **As-of join acceleration**
+   - build a date_key bridge or precomputed validity map for the city dimension
 
-### 11) Performance & Storage Hygiene
-- [x] Bronze/Silver partitioned by `_ingest_yyyymmdd`
-- [x] Gold fact partitioned by `year, month`
-- [x] Auto optimize enabled on core tables
-- [x] ZORDER hints provided for BI-friendly access paths
-- [x] Join drop and unmatched dimension records are measurable for integrity analysis
+2. **Closed-loop replay registry**
+   - record replay criteria + output counts; optionally mark replayed quarantine rows
 
-**Assessment:** Good baseline. As-of joins can be the next performance focus at scale.
+3. **Retention enforcement job**
+   - `quarantine_retention_candidates` already provides visibility; scheduled deletes make it complete
 
----
-
-## Summary of Strengths (Staff View)
-- Streaming semantics are correct and stable
-- Strong contract projection and strict DQ enforcement in Silver
-- Actionable quarantine model with reasons, partitioning, and metrics
-- Observability is robust: drift, type drift, freshness, ingest quality, join integrity
-- Gold model supports both current-state and historically correct reporting
-- Rescued-data recovery workflow supports controlled schema evolution
-
----
-
-## Review Notes — Focus Areas for Ongoing Hardening
-
-### Operational Lifecycle (Run Completeness)
-`ops_run_audit` records run context and parameters. A complementary completion audit (status + per-run output counts) can be scheduled via workflow tasks for full lifecycle coverage.
-
-### Retention Enforcement (Quarantine Lifecycle)
-Retention candidates are identified in `quarantine_retention_candidates`. Enforcement (DELETE + optional VACUUM) is typically executed via scheduled operational jobs.
-
-### Historical As-Of Performance
-`fact_trips_asof` is correctness-first. At larger scale, consider a precomputed as-of bridge to reduce join cost.
-
----
-
-## Primary Tables
-
-### Bronze
-- `bronze_city`
-- `bronze_trips`
-- `bronze_trips_backfill` (conditional)
-
-### Silver
-- `silver_city` (SCD2)
-- `silver_trips` (SCD1)
-- `quarantine_city`
-- `quarantine_trips`
-- `schema_drift_log`
-- `type_drift_log`
-- `rescued_city_profile`
-- `rescued_trips_profile`
-
-### Gold
-- `dim_city_current`
-- `dim_date`
-- `fact_trips_current`
-- `fact_trips_asof`
-- `fact_trips_daily`
-- `pipeline_guardrails`
-- `bronze_ingest_quality`
-- `join_drop_summary`
-- `freshness_summary`
-- `data_quality_summary`
-- `ops_run_audit`
-- `quarantine_retention_candidates`
+4. **Operational dashboards**
+   - a simple dashboard over guardrails + freshness + drift + quarantine is high ROI
 
 ---
 
 ## Quick Start
 
-1. Configure storage paths in `_common/paths.py` and ensure the target catalog/schemas exist.
+1. Set storage paths in `_common/paths.py` and ensure the target catalog/schemas exist.
 2. Create a DLT pipeline pointing at the repository.
 3. Run an initial **Full Refresh** on first deployment.
-4. Monitor:
+4. Watch:
    - `gold.pipeline_guardrails`
    - `gold.bronze_ingest_quality`
-   - `gold.data_quality_summary`
-   - `gold.join_drop_summary`
    - `silver.schema_drift_log`
    - `silver.type_drift_log`
+   - `gold.join_drop_summary`
+   - `gold.freshness_summary`
 
 ---
+
+## License
+Choose a license appropriate for the repository (MIT/Apache-2.0 are common choices).
