@@ -1,4 +1,4 @@
-# Transportation DLT Pipeline (Databricks) — Production Medallion Architecture
+# Ride Sharing DLT Pipeline (Databricks) — Production Medallion Architecture
 
 A production-minded Delta Live Tables (DLT) pipeline implementing a Medallion pattern (Bronze → Silver → Gold) for **City** master data and **Trips** fact data. The pipeline emphasizes **streaming correctness**, **strict contracts**, **quarantine-based data quality**, **schema/type drift observability**, **rescued-data recovery**, and **guardrails** that can block unsafe runs.
 
